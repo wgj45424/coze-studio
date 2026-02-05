@@ -1,55 +1,73 @@
-name: Package Coze for Offline Use (e.g., CentOS 7)
+name: 📦 Package Coze Studio Offline Docker Bundle
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:  # 手动触发（推荐）
   push:
     tags:
-      - 'v*.*.*'      # 打 tag 时自动打包发布
+      - 'v*.*.*'      # 打 tag 时自动发布到 Releases
+
 jobs:
-  package-docker:
-    runs-on: ubuntu-latest  # GitHub 不提供 CentOS 7 runner，但构建的镜像可在 CentOS 7 运行
+  package-offline-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 用于发布 Release
 
     steps:
-      - name: Checkout code
+      - name: 🔁 Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
 
-      - name: Set up Docker Buildx
+      - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Prepare .env file
+      - name: 📁 Navigate to docker directory
+        run: cd docker && pwd
+
+      - name: 🛠️ Prepare .env file
         run: |
-          cp ./docker/.env.example ./docker/.env
-          # 可选：修改默认配置（如禁用 telemetry、设默认密码等）
-          sed -i 's/TELEMETRY_ENABLED=.*/TELEMETRY_ENABLED=false/' ./docker/.env
+          cd docker
+          cp .env.example .env
+          # 可选：关闭遥测、设默认值等
+          sed -i 's/TELEMETRY_ENABLED=.*/TELEMETRY_ENABLED=false/' .env || true
 
-      - name: Build all Coze services via docker compose
+      - name: 🧱 Build all services (including coze-server & coze-web)
         run: |
-          docker compose -f ./docker/docker-compose.yml build --no-cache
+          cd docker
+          # 强制从源码构建，即使 compose 文件中 image 已定义
+          docker compose build --no-cache --pull
 
-      - name: List built images
+      - name: 📋 List built images
         run: |
-          echo "Built images:"
-          docker compose -f ./docker/docker-compose.yml config --images
+          cd docker
+          echo "=== Built images ==="
+          docker compose config --images
 
-      - name: Save all images to a single tar file
+      - name: 💾 Save all images to tarball
         run: |
-          IMAGES=$(docker compose -f ./docker/docker-compose.yml config --images)
-          # Also include common base images if you want FULL offline support
-          docker save $IMAGES postgres:15 redis:7 -o coze-full-offline.tar
+          cd docker
+          IMAGES=$(docker compose config --images)
+          echo "Saving images: $IMAGES"
+          docker save $IMAGES -o coze-studio-full.tar
 
-      - name: Compress (optional, reduce size)
-        run: gzip -9 coze-full-offline.tar
+      - name: 🗜️ Compress tarball (reduce size)
+        run: |
+          cd docker
+          gzip -9 coze-studio-full.tar
 
-      - name: Upload as Artifact
+      - name: 📤 Upload as GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coze-offline-package-centos7-compatible
-          path: coze-full-offline.tar.gz
+          name: coze-studio-offline-bundle
+          path: docker/coze-studio-full.tar.gz
           retention-days: 30
 
-      - name: Create GitHub Release (if tagged)
+      - name: 🚀 Publish to GitHub Releases (if tagged)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: coze-full-offline.tar.gz
+          files: docker/coze-studio-full.tar.gz
           token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
