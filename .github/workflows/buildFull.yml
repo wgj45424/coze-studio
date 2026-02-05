@@ -1,73 +1,94 @@
-name: 📦 Package Coze Studio Offline Docker Bundle
+name: 📦 Package Coze Studio Offline Bundle
 
 on:
-  workflow_dispatch:  # 手动触发（推荐）
+  workflow_dispatch:
   push:
     tags:
-      - 'v*.*.*'      # 打 tag 时自动发布到 Releases
+      - 'v*.*.*'
 
 jobs:
-  package-offline-bundle:
+  package:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 用于发布 Release
+      contents: write
 
     steps:
       - name: 🔁 Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive  # 如果有子模块
           fetch-depth: 1
 
-      - name: 🐳 Set up Docker Buildx
+      - name: 🐳 Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      - name: 📁 Navigate to docker directory
-        run: cd docker && pwd
+      # ==============================
+      # ✅ 关键：在项目根目录构建自研服务
+      # ==============================
+      - name: 🧱 Build coze-server from root
+        run: |
+          docker build \
+            -t cozedev/coze-studio-server:latest \
+            -f backend/Dockerfile \
+            .
 
-      - name: 🛠️ Prepare .env file
+      - name: 🧱 Build coze-web from root
+        run: |
+          docker build \
+            -t cozedev/coze-studio-web:latest \
+            -f frontend/Dockerfile \
+            .
+
+      # ==============================
+      # ✅ 验证镜像是否真的存在
+      # ==============================
+      - name: 🔍 Verify custom images exist
+        run: |
+          docker images | grep cozedev
+          if ! docker images cozedev/coze-studio-server:latest --format "{{.ID}}" | grep -q .; then
+            echo "❌ coze-server image missing!"
+            exit 1
+          fi
+          if ! docker images cozedev/coze-studio-web:latest --format "{{.ID}}" | grep -q .; then
+            echo "❌ coze-web image missing!"
+            exit 1
+          fi
+
+      # ==============================
+      # ✅ 拉取所有公共基础镜像（确保完整离线）
+      # ==============================
+      - name: 📥 Pull all public base images
         run: |
           cd docker
-          cp .env.example .env
-          # 可选：关闭遥测、设默认值等
-          sed -i 's/TELEMETRY_ENABLED=.*/TELEMETRY_ENABLED=false/' .env || true
+          IMAGES=$(docker compose config --images | grep -v "cozedev/")
+          echo "Pulling public images: $IMAGES"
+          for img in $IMAGES; do
+            docker pull "$img"
+          done
 
-      - name: 🧱 Build all services (including coze-server & coze-web)
-        run: |
-          cd docker
-          # 强制从源码构建，即使 compose 文件中 image 已定义
-          docker compose build --no-cache --pull
-
-      - name: 📋 List built images
-        run: |
-          cd docker
-          echo "=== Built images ==="
-          docker compose config --images
-
-      - name: 💾 Save all images to tarball
+      # ==============================
+      # ✅ 导出完整镜像包
+      # ==============================
+      - name: 💾 Save all images to tar
         run: |
           cd docker
           IMAGES=$(docker compose config --images)
-          echo "Saving images: $IMAGES"
+          echo "Saving images:"
+          echo "$IMAGES"
           docker save $IMAGES -o coze-studio-full.tar
 
-      - name: 🗜️ Compress tarball (reduce size)
-        run: |
-          cd docker
-          gzip -9 coze-studio-full.tar
+      - name: 🗜️ Compress
+        run: gzip -9 docker/coze-studio-full.tar
 
-      - name: 📤 Upload as GitHub Artifact
+      - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coze-studio-offline-bundle
+          name: coze-offline-bundle
           path: docker/coze-studio-full.tar.gz
           retention-days: 30
 
-      - name: 🚀 Publish to GitHub Releases (if tagged)
+      - name: 🚀 Release (if tagged)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: docker/coze-studio-full.tar.gz
-          token: ${{ secrets.GITHUB_TOKEN }}
-          draft: false
-          prerelease: false
