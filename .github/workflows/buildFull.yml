@@ -1,76 +1,56 @@
-# should be optimize as increment build & test
-name: CI@main
-on:
-  push:
-    # test only
-    branches: ['main',"chore/setup-ci"]
-    paths:
-      - 'github/**'
-      - 'idl/**'
-      - 'frontend/**'
-      - 'common/**'
-      - 'rush.json'
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+name: Package Coze for Offline Use (e.g., CentOS 7)
 
-permissions:
-  contents: read
+on:
+  workflow_dispatch:  # 手动触发
+  push:
+    tags:
+      - 'v*.*.*'      # 打 tag 时自动打包发布
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - NodeVersion: 22.16.0
-            NodeVersionDisplayName: 22
-            OS: ubuntu-latest
-    name: Node.js v${{ matrix.NodeVersionDisplayName }} (${{ matrix.OS }})
-    runs-on: ${{ matrix.OS }}
+  package-docker:
+    runs-on: ubuntu-latest  # GitHub 不提供 CentOS 7 runner，但构建的镜像可在 CentOS 7 运行
+
     steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 1
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Config Git User
-        # should be turn to ci user
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare .env file
         run: |
-          git config --local user.name "flow_bot"
-          git config --local user.email "flow_bot@bytedance.com"
+          cp ./docker/.env.example ./docker/.env
+          # 可选：修改默认配置（如禁用 telemetry、设默认密码等）
+          sed -i 's/TELEMETRY_ENABLED=.*/TELEMETRY_ENABLED=false/' ./docker/.env
 
-      - uses: actions/setup-node@v3
-        with:
-          node-version: ${{ matrix.NodeVersion }}
-
-      - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            common/temp/pnpm-local
-            common/temp/pnpm-store
-            common/temp/install-run
-          key: ${{ runner.os }}-rush-store-main
-          restore-keys: |
-            ${{ runner.os }}-rush-store-main
-            ${{ runner.os }}-rush-store
-
-      - name: Install Dependencies
+      - name: Build all Coze services via docker compose
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev
-          node common/scripts/install-run-rush.js install
+          docker compose -f ./docker/docker-compose.yml build --no-cache
 
-      - name: Build all
-        run: node common/scripts/install-run-rush.js build --verbose
+      - name: List built images
+        run: |
+          echo "Built images:"
+          docker compose -f ./docker/docker-compose.yml config --images
 
-      - name: Test:cov all
-        run: node common/scripts/install-run-rush.js test:cov --verbose
+      - name: Save all images to a single tar file
+        run: |
+          IMAGES=$(docker compose -f ./docker/docker-compose.yml config --images)
+          # Also include common base images if you want FULL offline support
+          docker save $IMAGES postgres:15 redis:7 -o coze-full-offline.tar
 
-      - name: Upload coverage reports
-        uses: codecov/codecov-action@v4
+      - name: Compress (optional, reduce size)
+        run: gzip -9 coze-full-offline.tar
+
+      - name: Upload as Artifact
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
-          verbose: true
+          name: coze-offline-package-centos7-compatible
+          path: coze-full-offline.tar.gz
+          retention-days: 30
 
-      - name: Lint all
-        run: node common/scripts/install-run-rush.js lint --verbose
+      - name: Create GitHub Release (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: coze-full-offline.tar.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
